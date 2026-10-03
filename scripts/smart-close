@@ -8,12 +8,14 @@ exact overlay instead of blindly typing Enter into arbitrary applications.
 
 from __future__ import annotations
 
+import fcntl
+import glob
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 
 MOONLIGHT_CLASS = "com.moonlight_stream.Moonlight"
@@ -64,19 +66,82 @@ def cmdline(pid: int) -> list[str]:
     return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
 
 
+def option_value(argv: list[str], *names: str) -> str:
+    for index, arg in enumerate(argv):
+        for name in names:
+            if arg == name and index + 1 < len(argv):
+                return argv[index + 1]
+            prefix = name + "="
+            if arg.startswith(prefix):
+                return arg[len(prefix):]
+    return ""
+
+
 def is_kitty_close_confirmation(kitty_pid: int) -> bool:
     for pid in descendants(kitty_pid):
         argv = cmdline(pid)
         if not argv:
             continue
-        if not any("kittens.runner" in arg for arg in argv):
+
+        # Kitty 0.49 launches built-in kittens as `/usr/bin/kitten ask ...`.
+        # Older/internal paths can still use the Python kittens.runner entry.
+        executable = Path(argv[0]).name
+        direct_ask = executable == "kitten" and len(argv) > 1 and argv[1] == "ask"
+        runner_ask = any("kittens.runner" in arg for arg in argv) and "ask" in argv
+        if not (direct_ask or runner_ask):
             continue
-        if "ask" not in argv or "--type=yesno" not in argv:
-            continue
-        for index, arg in enumerate(argv[:-1]):
-            if arg in {"--title", "--window-title"} and argv[index + 1] == "Close OS window":
-                return True
+
+        ask_type = option_value(argv, "--type", "-t")
+        title = option_value(argv, "--title", "--window-title")
+        if ask_type == "yesno" and title == "Close OS window":
+            return True
     return False
+
+
+KEY_Q = 16
+KEY_LEFTMETA = 125
+KEY_RIGHTMETA = 126
+
+
+def key_is_down(key_code: int) -> bool | None:
+    # EVIOCGKEY reports the current pressed-key bitmap without consuming input.
+    # Query every readable evdev node so this works for the laptop keyboard and
+    # external keyboards without hard-coding event numbers.
+    bitmap_size = 32
+    request = (2 << 30) | (ord("E") << 8) | 0x18 | (bitmap_size << 16)
+    queried = False
+    for device in glob.glob("/dev/input/event*"):
+        try:
+            with open(device, "rb", buffering=0) as handle:
+                bitmap = bytearray(bitmap_size)
+                fcntl.ioctl(handle.fileno(), request, bitmap, True)
+                queried = True
+                if bitmap[key_code // 8] & (1 << (key_code % 8)):
+                    return True
+        except OSError:
+            continue
+    return False if queried else None
+
+
+def wait_for_shortcut_release(timeout: float = 2.0) -> None:
+    # Hyprland runs the binding on key-down. Sending Enter while Super is still
+    # physically held can become Super+Enter, so wait for the actual shortcut
+    # keys to be released. If evdev state is unavailable, fall back to a short
+    # delay rather than guessing forever.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        states = [
+            key_is_down(KEY_Q),
+            key_is_down(KEY_LEFTMETA),
+            key_is_down(KEY_RIGHTMETA),
+        ]
+        if all(state is None for state in states):
+            time.sleep(0.20)
+            return
+        if not any(state is True for state in states):
+            time.sleep(0.04)
+            return
+        time.sleep(0.02)
 
 
 def press_enter() -> bool:
@@ -120,6 +185,7 @@ def main() -> int:
         return 0
 
     if confirming:
+        wait_for_shortcut_release()
         return 0 if press_enter() else 1
 
     return normal_close()
