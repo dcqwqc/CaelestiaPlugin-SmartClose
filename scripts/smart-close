@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Safe Super+Q wrapper for Hyprland/Kitty.
+
+First press asks the compositor to close the active window. If Kitty opens its
+own destructive close-confirmation overlay, a second press accepts only that
+exact overlay instead of blindly typing Enter into arbitrary applications.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+MOONLIGHT_CLASS = "com.moonlight_stream.Moonlight"
+KITTY_CLASSES = {"kitty"}
+
+
+def run(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, text=True, capture_output=True, check=check)
+
+
+def active_window() -> dict:
+    proc = run("hyprctl", "activewindow", "-j")
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {}
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {}
+
+
+def child_pids(pid: int) -> list[int]:
+    path = Path(f"/proc/{pid}/task/{pid}/children")
+    try:
+        return [int(value) for value in path.read_text().split()]
+    except (OSError, ValueError):
+        return []
+
+
+def descendants(pid: int) -> list[int]:
+    found: list[int] = []
+    pending = child_pids(pid)
+    seen: set[int] = set()
+    while pending:
+        child = pending.pop()
+        if child in seen:
+            continue
+        seen.add(child)
+        found.append(child)
+        pending.extend(child_pids(child))
+    return found
+
+
+def cmdline(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+
+
+def is_kitty_close_confirmation(kitty_pid: int) -> bool:
+    for pid in descendants(kitty_pid):
+        argv = cmdline(pid)
+        if not argv:
+            continue
+        if not any("kittens.runner" in arg for arg in argv):
+            continue
+        if "ask" not in argv or "--type=yesno" not in argv:
+            continue
+        for index, arg in enumerate(argv[:-1]):
+            if arg in {"--title", "--window-title"} and argv[index + 1] == "Close OS window":
+                return True
+    return False
+
+
+def press_enter() -> bool:
+    if shutil.which("wtype"):
+        proc = run("wtype", "-k", "Return")
+        if proc.returncode == 0:
+            return True
+    if shutil.which("ydotool"):
+        proc = run("ydotool", "key", "28:1", "28:0")
+        if proc.returncode == 0:
+            return True
+    return False
+
+
+def normal_close() -> int:
+    return run("hyprctl", "eval", "hl.dispatch(hl.dsp.window.close())").returncode
+
+
+def main() -> int:
+    window = active_window()
+    if not window:
+        return 0
+
+    window_class = str(window.get("class") or window.get("initialClass") or "")
+    try:
+        pid = int(window.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+
+    confirming = window_class.lower() in KITTY_CLASSES and pid > 0 and is_kitty_close_confirmation(pid)
+
+    if "--probe" in sys.argv:
+        print(json.dumps({
+            "class": window_class,
+            "pid": pid,
+            "kittyCloseConfirmation": confirming,
+        }))
+        return 0
+
+    if window_class == MOONLIGHT_CLASS:
+        return 0
+
+    if confirming:
+        return 0 if press_enter() else 1
+
+    return normal_close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
