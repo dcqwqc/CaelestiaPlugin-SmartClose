@@ -1,29 +1,22 @@
 #!/usr/bin/env python3
-"""Safe Super+Q wrapper for Hyprland/Kitty.
+"""Safe Super+Q wrapper for Hyprland.
 
-First press asks the compositor to close the active window. If Kitty opens its
-own destructive close-confirmation overlay, a second press accepts only that
-exact overlay instead of blindly typing Enter into arbitrary applications.
+Ghostty does not use Kitty's kitten-based OS-window close confirmation, so the
+old Kitty-specific second-press machinery is intentionally gone. Moonlight
+remains protected because closing the stream window accidentally is disruptive;
+every other window receives the normal Hyprland close request.
 """
-
 from __future__ import annotations
 
-import fcntl
-import glob
 import json
-from pathlib import Path
-import shutil
 import subprocess
 import sys
-import time
-
 
 MOONLIGHT_CLASS = "com.moonlight_stream.Moonlight"
-KITTY_CLASSES = {"kitty"}
 
 
-def run(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, text=True, capture_output=True, check=check)
+def run(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, text=True, capture_output=True)
 
 
 def active_window() -> dict:
@@ -34,126 +27,6 @@ def active_window() -> dict:
         return json.loads(proc.stdout)
     except json.JSONDecodeError:
         return {}
-
-
-def child_pids(pid: int) -> list[int]:
-    path = Path(f"/proc/{pid}/task/{pid}/children")
-    try:
-        return [int(value) for value in path.read_text().split()]
-    except (OSError, ValueError):
-        return []
-
-
-def descendants(pid: int) -> list[int]:
-    found: list[int] = []
-    pending = child_pids(pid)
-    seen: set[int] = set()
-    while pending:
-        child = pending.pop()
-        if child in seen:
-            continue
-        seen.add(child)
-        found.append(child)
-        pending.extend(child_pids(child))
-    return found
-
-
-def cmdline(pid: int) -> list[str]:
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return []
-    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
-
-
-def option_value(argv: list[str], *names: str) -> str:
-    for index, arg in enumerate(argv):
-        for name in names:
-            if arg == name and index + 1 < len(argv):
-                return argv[index + 1]
-            prefix = name + "="
-            if arg.startswith(prefix):
-                return arg[len(prefix):]
-    return ""
-
-
-def is_kitty_close_confirmation(kitty_pid: int) -> bool:
-    for pid in descendants(kitty_pid):
-        argv = cmdline(pid)
-        if not argv:
-            continue
-
-        # Kitty 0.49 launches built-in kittens as `/usr/bin/kitten ask ...`.
-        # Older/internal paths can still use the Python kittens.runner entry.
-        executable = Path(argv[0]).name
-        direct_ask = executable == "kitten" and len(argv) > 1 and argv[1] == "ask"
-        runner_ask = any("kittens.runner" in arg for arg in argv) and "ask" in argv
-        if not (direct_ask or runner_ask):
-            continue
-
-        ask_type = option_value(argv, "--type", "-t")
-        title = option_value(argv, "--title", "--window-title")
-        if ask_type == "yesno" and title == "Close OS window":
-            return True
-    return False
-
-
-KEY_Q = 16
-KEY_LEFTMETA = 125
-KEY_RIGHTMETA = 126
-
-
-def key_is_down(key_code: int) -> bool | None:
-    # EVIOCGKEY reports the current pressed-key bitmap without consuming input.
-    # Query every readable evdev node so this works for the laptop keyboard and
-    # external keyboards without hard-coding event numbers.
-    bitmap_size = 32
-    request = (2 << 30) | (ord("E") << 8) | 0x18 | (bitmap_size << 16)
-    queried = False
-    for device in glob.glob("/dev/input/event*"):
-        try:
-            with open(device, "rb", buffering=0) as handle:
-                bitmap = bytearray(bitmap_size)
-                fcntl.ioctl(handle.fileno(), request, bitmap, True)
-                queried = True
-                if bitmap[key_code // 8] & (1 << (key_code % 8)):
-                    return True
-        except OSError:
-            continue
-    return False if queried else None
-
-
-def wait_for_shortcut_release(timeout: float = 2.0) -> None:
-    # Hyprland runs the binding on key-down. Sending Enter while Super is still
-    # physically held can become Super+Enter, so wait for the actual shortcut
-    # keys to be released. If evdev state is unavailable, fall back to a short
-    # delay rather than guessing forever.
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        states = [
-            key_is_down(KEY_Q),
-            key_is_down(KEY_LEFTMETA),
-            key_is_down(KEY_RIGHTMETA),
-        ]
-        if all(state is None for state in states):
-            time.sleep(0.20)
-            return
-        if not any(state is True for state in states):
-            time.sleep(0.04)
-            return
-        time.sleep(0.02)
-
-
-def press_enter() -> bool:
-    if shutil.which("wtype"):
-        proc = run("wtype", "-k", "Return")
-        if proc.returncode == 0:
-            return True
-    if shutil.which("ydotool"):
-        proc = run("ydotool", "key", "28:1", "28:0")
-        if proc.returncode == 0:
-            return True
-    return False
 
 
 def normal_close() -> int:
@@ -171,23 +44,13 @@ def main() -> int:
     except (TypeError, ValueError):
         pid = 0
 
-    confirming = window_class.lower() in KITTY_CLASSES and pid > 0 and is_kitty_close_confirmation(pid)
-
+    protected = window_class == MOONLIGHT_CLASS
     if "--probe" in sys.argv:
-        print(json.dumps({
-            "class": window_class,
-            "pid": pid,
-            "kittyCloseConfirmation": confirming,
-        }))
+        print(json.dumps({"class": window_class, "pid": pid, "protected": protected}))
         return 0
 
-    if window_class == MOONLIGHT_CLASS:
+    if protected:
         return 0
-
-    if confirming:
-        wait_for_shortcut_release()
-        return 0 if press_enter() else 1
-
     return normal_close()
 
 
