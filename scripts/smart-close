@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Safe Super+Q wrapper for Hyprland.
 
-Ghostty does not use Kitty's kitten-based OS-window close confirmation, so the
-old Kitty-specific second-press machinery is intentionally gone. Moonlight
+Ghostty needs no emulator-specific OS-window confirmation workaround. Moonlight
 remains protected because closing the stream window accidentally is disruptive;
 every other window receives the normal Hyprland close request.
 """
