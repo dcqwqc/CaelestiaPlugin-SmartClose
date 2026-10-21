@@ -5,5 +5,6 @@
   "homepage": "https://github.com/dcqwqc/CaelestiaPlugin-SmartClose",
   "icon": "close",
   "description": "Safe Super+Q handling with Moonlight protection; terminal-agnostic and Ghostty-ready.",
-  "entryPoints": []
+  "entryPoints": [],
+  "requires": ">=2.1.0"
 }
