@@ -1,0 +1,10 @@
+{
+  "name": "SmartClose",
+  "version": "1.1.0",
+  "author": "dcqwqc",
+  "homepage": "https://github.com/dcqwqc/CaelestiaPlugin-SmartClose",
+  "icon": "close",
+  "description": "Safe Super+Q handling with Moonlight protection; terminal-agnostic and Ghostty-ready.",
+  "entryPoints": [],
+  "requires": ">=2.1.0"
+}
